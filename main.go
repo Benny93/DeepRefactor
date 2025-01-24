@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
+	"regexp"
 
 	"github.com/alecthomas/kong"
 )
@@ -16,31 +18,7 @@ type CLI struct {
 	Args        []string `arg:"" optional:""`
 }
 
-func (cli *CLI) Run() error {
-	// Construct the full command to execute
-	cmd := exec.Command(cli.LintCommand, cli.Args...)
-	// Capture standard output and standard error
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	// Execute the command
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("failed to run lint command: %v\n%s", err, stderr.String())
-	}
-
-	// Output the standard output and errors if there are any issues
-	if len(stderr.String()) > 0 {
-		fmt.Printf("Linting errors:\n%s\n", stderr.String())
-		// Call Ollama server to fix the errors
-		if err := callOllamaServer(stderr.String()); err != nil {
-			return fmt.Errorf("failed to call Ollama server: %v", err)
-		}
-	} else {
-		fmt.Println("No linting errors found.")
-	}
-	return nil
-}
-
+// Define the request body for the Ollama API
 type OllamaRequest struct {
 	Model  string `json:"model"`
 	Prompt string `json:"prompt"`
@@ -52,9 +30,67 @@ type OllamaResponse struct {
 	Response string `json:"response"`
 }
 
-func callOllamaServer(errorOutput string) error {
+// ExtractFilePath extracts a file path from a given string.
+// It supports Windows-style paths (e.g., `C:\path\to\file.go`) and optionally
+// includes line and column numbers (e.g., `C:\path\to\file.go:21:6`).
+func ExtractFilePath(input string) string {
+	// Regular expression to match file paths
+	re := regexp.MustCompile(`[A-Za-z]:(\\[^:]+)+\.go`)
+	return re.FindString(input)
+}
+
+func (cli *CLI) Run() error {
+
+	// Construct the full command to execute
+	cmd := exec.Command(cli.LintCommand, cli.Args...)
+
+	// Capture standard output and standard error
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// Execute the command
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("Linting errors:\n%s\n", stderr.String())
+		// extract file path from error message "[linters_context] typechecking error: D:\\dev\\DeepRefactor\\testdata\\mistakes.go:21:6: y declared and not used"
+		filePath := ExtractFilePath(stderr.String())
+		if filePath == "" {
+			fmt.Println("No file path found.")
+		}
+		fmt.Println("Filepath found at " + filePath)
+
+		// Read the content of the affected file
+		fileContent, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to read file %s: %v", filePath, err)
+		}
+
+		// Call Ollama server to fix the errors
+		if err := callOllamaServer(filePath, string(fileContent), stderr.String()); err != nil {
+			return fmt.Errorf("failed to call Ollama server: %v", err)
+		}
+		return fmt.Errorf("failed to run lint command: %v", err)
+	}
+
+	// Output the standard output and errors if there are any issues
+	if len(stderr.String()) > 0 {
+		fmt.Printf("Linting errors:\n%s\n", stderr.String())
+	} else {
+		fmt.Println("No linting errors found.")
+	}
+
+	return nil
+}
+
+func callOllamaServer(fileName, fileContent, errorOutput string) error {
 	// Prepare the prompt for Ollama
-	prompt := fmt.Sprintf("I have the following Go linting errors:\n%s\nCan you suggest a fix?", errorOutput)
+	prompt := fmt.Sprintf(`I have the following Go linting errors in the file %s:
+%s
+
+Here is the content of the file:
+%s
+
+Please provide a complete fixed version of the file. Do not include any explanations or additional text. Only return the complete code.`, fileName, errorOutput, fileContent)
 
 	// Create the request body
 	requestBody := OllamaRequest{
@@ -83,7 +119,7 @@ func callOllamaServer(errorOutput string) error {
 	}
 
 	// Output the suggested fix
-	fmt.Printf("Suggested fix from Ollama:\n%s\n", ollamaResponse.Response)
+	fmt.Printf("Fixed version of the file:\n%s\n", ollamaResponse.Response)
 
 	return nil
 }
