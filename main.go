@@ -32,14 +32,13 @@ type OllamaResponse struct {
 }
 
 // ExtractFilePath extracts a file path from a given string.
-// It supports Windows-style paths (e.g., `C:\path\to\file.go`) and optionally
-// includes line and column numbers (e.g., `C:\path\to\file.go:21:6`).
+// It supports both Windows-style paths (e.g., `C:\path\to\file.go`) and
+// Unix-style paths (e.g., `/home/user/project/file.go`).
 func ExtractFilePath(input string) string {
 	// Regular expression to match file paths (both absolute and relative)
-	re := regexp.MustCompile(`([A-Za-z]:)?(\\[^:]+|[\w\\/]+)+\.go`)
+	re := regexp.MustCompile(`([A-Za-z]:)?([\\/]?[^:\s\\/]+[\\/]?)+\.go`)
 	return re.FindString(input)
 }
-
 func (cli *CLI) Run() error {
 	for {
 		// Construct the full command to execute
