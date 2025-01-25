@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strings"
 
 	"github.com/alecthomas/kong"
 )
@@ -34,8 +35,8 @@ type OllamaResponse struct {
 // It supports Windows-style paths (e.g., `C:\path\to\file.go`) and optionally
 // includes line and column numbers (e.g., `C:\path\to\file.go:21:6`).
 func ExtractFilePath(input string) string {
-	// Regular expression to match file paths
-	re := regexp.MustCompile(`[A-Za-z]:(\\[^:]+)+\.go`)
+	// Regular expression to match file paths (both absolute and relative)
+	re := regexp.MustCompile(`([A-Za-z]:)?(\\[^:]+|[\w\\/]+)+\.go`)
 	return re.FindString(input)
 }
 
@@ -51,9 +52,10 @@ func (cli *CLI) Run() error {
 
 	// Execute the command
 	if err := cmd.Run(); err != nil {
-		fmt.Printf("Linting errors:\n%s\n", stderr.String())
+		combined := fmt.Sprintf("%s\n%s", stderr.String(), stdout.String())
+		fmt.Printf("Linting errors:\n%s", combined)
 		// extract file path from error message "[linters_context] typechecking error: D:\\dev\\DeepRefactor\\testdata\\mistakes.go:21:6: y declared and not used"
-		filePath := ExtractFilePath(stderr.String())
+		filePath := ExtractFilePath(combined)
 		if filePath == "" {
 			fmt.Println("No file path found.")
 		}
@@ -66,10 +68,9 @@ func (cli *CLI) Run() error {
 		}
 
 		// Call Ollama server to fix the errors
-		if err := callOllamaServer(filePath, string(fileContent), stderr.String()); err != nil {
+		if err := callOllamaServer(filePath, string(fileContent), combined); err != nil {
 			return fmt.Errorf("failed to call Ollama server: %v", err)
 		}
-		return fmt.Errorf("failed to run lint command: %v", err)
 	}
 
 	// Output the standard output and errors if there are any issues
@@ -90,7 +91,7 @@ func callOllamaServer(fileName, fileContent, errorOutput string) error {
 Here is the content of the file:
 %s
 
-Please provide a complete fixed version of the file. Do not include any explanations or additional text. Only return the complete code.`, fileName, errorOutput, fileContent)
+Please provide a complete fixed version of the file. Do not include any explanations or additional text. Only return the complete code. Add comments to the code where you applied a fix per line. Also add a comment that summarized all the linter issues. All your comments should have the prefix [DeepRefactor]`, fileName, errorOutput, fileContent)
 
 	// Create the request body
 	requestBody := OllamaRequest{
@@ -118,10 +119,35 @@ Please provide a complete fixed version of the file. Do not include any explanat
 		return fmt.Errorf("failed to decode response from Ollama server: %v", err)
 	}
 
-	// Output the suggested fix
-	fmt.Printf("Fixed version of the file:\n%s\n", ollamaResponse.Response)
+	// Remove escaping backticks (```) from the response
+	fixedContent := removeEscapingBackticks(ollamaResponse.Response)
 
+	// Output the suggested fix
+	fmt.Printf("Fixed version of the file:\n%s\n", fixedContent)
+
+	// Write the fixed content back to the file
+	if err := os.WriteFile(fileName, []byte(fixedContent), 0644); err != nil {
+		return fmt.Errorf("failed to write fixed content to file %s: %v", fileName, err)
+	}
+
+	fmt.Printf("File %s has been updated with the fixed version.\n", fileName)
 	return nil
+}
+
+// removeEscapingBackticks removes the escaping backticks (```) from the response
+func removeEscapingBackticks(response string) string {
+	// Trim leading and trailing whitespace
+	response = strings.TrimSpace(response)
+
+	// Remove leading and trailing backticks (```)
+	response = strings.TrimPrefix(response, "```go")
+
+	response = strings.TrimSuffix(response, "```")
+
+	// Trim any remaining whitespace
+	response = strings.TrimSpace(response)
+
+	return response
 }
 
 func main() {
