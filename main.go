@@ -127,7 +127,7 @@ Please fix the issue by either removing the unused variable or adding code that 
 	requestBody := OllamaRequest{
 		Model:  "deepseek-coder-v2", // Replace with your desired model
 		Prompt: prompt,
-		Stream: false,
+		Stream: true, // Enable streaming
 	}
 
 	// Marshal the request body to JSON
@@ -143,39 +143,49 @@ Please fix the issue by either removing the unused variable or adding code that 
 	}
 	defer resp.Body.Close()
 
-	// Decode the response
-	var ollamaResponse OllamaResponse
-	if err := json.NewDecoder(resp.Body).Decode(&ollamaResponse); err != nil {
-		return fmt.Errorf("failed to decode response from Ollama server: %v", err)
+	// Open the file for writing (truncate it to start fresh)
+	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open file %s: %v", fileName, err)
+	}
+	defer file.Close()
+
+	// Create a decoder to read the streaming response
+	decoder := json.NewDecoder(resp.Body)
+
+	// Process the streaming response
+	for {
+		var ollamaResponse OllamaResponse
+		if err := decoder.Decode(&ollamaResponse); err != nil {
+			if err.Error() == "EOF" {
+				break // End of stream
+			}
+			return fmt.Errorf("failed to decode streaming response: %v", err)
+		}
+
+		// Remove escaping backticks (```) from the response
+		fixedContent := removeEscapingBackticks(ollamaResponse.Response)
+
+		// Write the fixed content to the file
+		if _, err := file.WriteString(fixedContent); err != nil {
+			return fmt.Errorf("failed to write to file %s: %v", fileName, err)
+		}
+
+		// Print the fixed content to the console (optional)
+		fmt.Print(fixedContent)
 	}
 
-	// Remove escaping backticks (```) from the response
-	fixedContent := removeEscapingBackticks(ollamaResponse.Response)
-
-	// Output the suggested fix
-	fmt.Printf("Fixed version of the file:\n%s\n", fixedContent)
-
-	// Write the fixed content back to the file
-	if err := os.WriteFile(fileName, []byte(fixedContent), 0644); err != nil {
-		return fmt.Errorf("failed to write fixed content to file %s: %v", fileName, err)
-	}
-
-	fmt.Printf("File %s has been updated with the fixed version.\n", fileName)
+	fmt.Printf("\nFile %s has been updated with the fixed version.\n", fileName)
 	return nil
 }
 
 // removeEscapingBackticks removes the escaping backticks (```) from the response
 func removeEscapingBackticks(response string) string {
-	// Trim leading and trailing whitespace
-	response = strings.TrimSpace(response)
 
 	// Remove leading and trailing backticks (```)
 	response = strings.TrimPrefix(response, "```go")
+	response = strings.TrimPrefix(response, "go")
 	response = strings.TrimSuffix(response, "```")
-
-	// Trim any remaining whitespace
-	response = strings.TrimSpace(response)
-
 	return response
 }
 
