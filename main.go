@@ -116,14 +116,13 @@ func (cli *CLI) handleLintingErrors(lintOutput string) error {
 
 func callOllamaServer(fileName, fileContent, errorOutput string) error {
 	// Prepare the prompt for Ollama
-	prompt := fmt.Sprintf(`I have the following Go linting errors in the file %s:
+	prompt := fmt.Sprintf(`I have the following Go linting error in the file %s:
 %s
 
-Here is the content of the file:
+Here is the relevant portion of the file:
 %s
 
-Please provide a complete fixed version of the file. Do not include any explanations or additional text. Only return the complete code. Add comments to the code where you applied a fix per line. Also add a comment that summarized all the linter issues. All your comments should have the prefix [DeepRefactor]`, fileName, errorOutput, fileContent)
-
+Please fix the issue by either removing the unused variable or adding code that uses it. Do not include any explanations or additional text. Only return the fixed code. Add a comment with the prefix [DeepRefactor] to indicate the fix.`, fileName, errorOutput, fileContent)
 	// Create the request body
 	requestBody := OllamaRequest{
 		Model:  "deepseek-coder-v2", // Replace with your desired model
