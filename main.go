@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/kong"
 )
@@ -39,47 +40,75 @@ func ExtractFilePath(input string) string {
 	re := regexp.MustCompile(`([A-Za-z]:)?([\\/]?[^:\s\\/]+[\\/]?)+\.go`)
 	return re.FindString(input)
 }
+
 func (cli *CLI) Run() error {
+	iteration := 1
 	for {
-		// Construct the full command to execute
-		cmd := exec.Command(cli.LintCommand, cli.Args...)
+		startTime := time.Now()
+		fmt.Printf("Starting iteration %d...\n", iteration)
 
-		// Capture standard output and standard error
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-
-		// Execute the command
-		if err := cmd.Run(); err != nil {
-			combined := fmt.Sprintf("%s\n%s", stderr.String(), stdout.String())
-			fmt.Printf("Linting errors:\n%s", combined)
-
-			// Extract file path from error message
-			filePath := ExtractFilePath(combined)
-			if filePath == "" {
-				fmt.Println("No file path found.")
-				break
+		// Run the linting command
+		lintOutput, err := cli.runLintCommand()
+		if err != nil {
+			// Handle linting errors
+			if err := cli.handleLintingErrors(lintOutput); err != nil {
+				return err
 			}
-			fmt.Println("Filepath found at " + filePath)
-
-			// Read the content of the affected file
-			fileContent, err := os.ReadFile(filePath)
-			if err != nil {
-				return fmt.Errorf("failed to read file %s: %v", filePath, err)
-			}
-
-			// Call Ollama server to fix the errors
-			if err := callOllamaServer(filePath, string(fileContent), combined); err != nil {
-				return fmt.Errorf("failed to call Ollama server: %v", err)
-			}
-
-			// Continue the loop to check for more errors
-			continue
+		} else {
+			// No linting errors found
+			fmt.Println("No linting errors found.")
+			break
 		}
 
-		// If no errors are found, exit the loop
-		fmt.Println("No linting errors found.")
-		break
+		// Log the time taken for the iteration
+		duration := time.Since(startTime)
+		fmt.Printf("Iteration %d completed in %v.\n", iteration, duration)
+		iteration++
+	}
+
+	return nil
+}
+
+// runLintCommand runs the linting command and returns its output.
+func (cli *CLI) runLintCommand() (string, error) {
+	cmd := exec.Command(cli.LintCommand, cli.Args...)
+
+	// Capture standard output and standard error
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// Execute the command
+	if err := cmd.Run(); err != nil {
+		// Combine stdout and stderr for error handling
+		return fmt.Sprintf("%s\n%s", stderr.String(), stdout.String()), err
+	}
+
+	// Return the combined output if no errors
+	return stdout.String(), nil
+}
+
+// handleLintingErrors processes linting errors and fixes the affected file.
+func (cli *CLI) handleLintingErrors(lintOutput string) error {
+	fmt.Printf("Linting errors:\n%s", lintOutput)
+
+	// Extract file path from error message
+	filePath := ExtractFilePath(lintOutput)
+	if filePath == "" {
+		fmt.Println("No file path found.")
+		return fmt.Errorf("no file path found in linting output")
+	}
+	fmt.Println("Filepath found at " + filePath)
+
+	// Read the content of the affected file
+	fileContent, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read file %s: %v", filePath, err)
+	}
+
+	// Call Ollama server to fix the errors
+	if err := callOllamaServer(filePath, string(fileContent), lintOutput); err != nil {
+		return fmt.Errorf("failed to call Ollama server: %v", err)
 	}
 
 	return nil
