@@ -41,43 +41,46 @@ func ExtractFilePath(input string) string {
 }
 
 func (cli *CLI) Run() error {
+	for {
+		// Construct the full command to execute
+		cmd := exec.Command(cli.LintCommand, cli.Args...)
 
-	// Construct the full command to execute
-	cmd := exec.Command(cli.LintCommand, cli.Args...)
+		// Capture standard output and standard error
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
 
-	// Capture standard output and standard error
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+		// Execute the command
+		if err := cmd.Run(); err != nil {
+			combined := fmt.Sprintf("%s\n%s", stderr.String(), stdout.String())
+			fmt.Printf("Linting errors:\n%s", combined)
 
-	// Execute the command
-	if err := cmd.Run(); err != nil {
-		combined := fmt.Sprintf("%s\n%s", stderr.String(), stdout.String())
-		fmt.Printf("Linting errors:\n%s", combined)
-		// extract file path from error message "[linters_context] typechecking error: D:\\dev\\DeepRefactor\\testdata\\mistakes.go:21:6: y declared and not used"
-		filePath := ExtractFilePath(combined)
-		if filePath == "" {
-			fmt.Println("No file path found.")
+			// Extract file path from error message
+			filePath := ExtractFilePath(combined)
+			if filePath == "" {
+				fmt.Println("No file path found.")
+				break
+			}
+			fmt.Println("Filepath found at " + filePath)
+
+			// Read the content of the affected file
+			fileContent, err := os.ReadFile(filePath)
+			if err != nil {
+				return fmt.Errorf("failed to read file %s: %v", filePath, err)
+			}
+
+			// Call Ollama server to fix the errors
+			if err := callOllamaServer(filePath, string(fileContent), combined); err != nil {
+				return fmt.Errorf("failed to call Ollama server: %v", err)
+			}
+
+			// Continue the loop to check for more errors
+			continue
 		}
-		fmt.Println("Filepath found at " + filePath)
 
-		// Read the content of the affected file
-		fileContent, err := os.ReadFile(filePath)
-		if err != nil {
-			return fmt.Errorf("failed to read file %s: %v", filePath, err)
-		}
-
-		// Call Ollama server to fix the errors
-		if err := callOllamaServer(filePath, string(fileContent), combined); err != nil {
-			return fmt.Errorf("failed to call Ollama server: %v", err)
-		}
-	}
-
-	// Output the standard output and errors if there are any issues
-	if len(stderr.String()) > 0 {
-		fmt.Printf("Linting errors:\n%s\n", stderr.String())
-	} else {
+		// If no errors are found, exit the loop
 		fmt.Println("No linting errors found.")
+		break
 	}
 
 	return nil
@@ -141,7 +144,6 @@ func removeEscapingBackticks(response string) string {
 
 	// Remove leading and trailing backticks (```)
 	response = strings.TrimPrefix(response, "```go")
-
 	response = strings.TrimSuffix(response, "```")
 
 	// Trim any remaining whitespace
