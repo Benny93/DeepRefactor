@@ -188,3 +188,15 @@ Here is the relevant portion of the file:
 Please fix the issue by either removing the unused variable or adding code that uses it. Do not include any explanations or additional text. Only return the fixed code. Add a comment with the prefix [DeepRefactor] to indicate the fix.`, fileName, errorOutput, fileContent)
 
 ```
+
+## TODO
+
+- Sometimes the model gets stuck and cannot fix the linter error
+- If it gets stuck it should have the option to start all over again 
+- User interaction
+- Support for Multiple Files
+- Fallback to Manual Fixes
+- Verbose and Quiet Modes
+- Configuration File
+- Performance Optimizations
+- Caching Model Responses
