@@ -2,6 +2,10 @@
 
 DeepRefactor is a CLI tool designed to automatically fix Go linting errors using the power of AI. It integrates with a local Ollama server and the `deepseek-coder-v2` model to analyze and refactor your Go code, ensuring it adheres to best practices and resolves linting issues.
 
+> This is a prototype as of now...
+
+![demo](./imgs/demo.gif)
+
 ---
 
 ## Features
@@ -71,6 +75,12 @@ Run DeepRefactor with your preferred Go linting tool (e.g., `golangci-lint`):
 
 ```bash
 deeprefactor golangci-lint run <filename>.go
+```
+
+Try it out with the provided example
+
+```bash
+go run main.go golangci-lint run testdata/mistakes.go
 ```
 
 ### Example
