@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/alecthomas/kong"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
 )
 
 var (
@@ -42,7 +44,7 @@ type FileProcess struct {
 }
 
 type model struct {
-	files      []*FileProcess
+	items      []TableItem
 	table      tableModel
 	logView    string
 	quitting   bool
@@ -72,13 +74,19 @@ type Row struct {
 	Data []string
 }
 
-// Update the tableStyles struct
 type tableStyles struct {
 	Header       lipgloss.Style
 	Cell         lipgloss.Style
 	Selected     lipgloss.Style
 	Border       lipgloss.Style
 	HeaderBorder lipgloss.Style
+}
+
+type TableItem struct {
+	Type   string // "directory" or "file"
+	Path   string
+	File   *FileProcess
+	Indent int
 }
 
 func main() {
@@ -109,7 +117,7 @@ func (cli *CLI) Run() error {
 	m := initialModel(files)
 	m.updateChan = make(chan FileUpdate, 100)
 
-	go cli.processFiles(m.updateChan, files)
+	go cli.processFiles(m.updateChan, m.items)
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
@@ -120,12 +128,56 @@ func (cli *CLI) Run() error {
 
 // Update the initialModel function
 func initialModel(files []*FileProcess) model {
-	columns := []string{"File", "Status", "Attempts"}
-	var rows []Row
+	// Group files by directory
+	dirMap := make(map[string][]*FileProcess)
 	for _, f := range files {
+		dir := filepath.Dir(f.Path)
+		dirMap[dir] = append(dirMap[dir], f)
+	}
+
+	// Create sorted list of directories
+	var dirs []string
+	for dir := range dirMap {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+
+	// Create table items with directory groups
+	var items []TableItem
+	for _, dir := range dirs {
+		// Add directory row
+		items = append(items, TableItem{
+			Type:   "directory",
+			Path:   dir + string(filepath.Separator),
+			Indent: 0,
+		})
+
+		// Add file rows
+		for _, f := range dirMap[dir] {
+			items = append(items, TableItem{
+				Type:   "file",
+				Path:   filepath.Base(f.Path),
+				File:   f,
+				Indent: 2,
+			})
+		}
+	}
+
+	// Create table columns
+	columns := []string{"Path", "Status", "Attempts"}
+
+	// Create initial rows for table
+	var rows []Row
+	for _, item := range items {
+		var status, attempts string
+		if item.Type == "file" {
+			status = item.File.Status
+			attempts = fmt.Sprintf("%d/%d", item.File.Retries, 5)
+		}
+
 		rows = append(rows, Row{
-			Key:  f.Path,
-			Data: []string{shortPath(f.Path), f.Status, fmt.Sprintf("%d/%d", f.Retries, 5)},
+			Key:  item.Path,
+			Data: []string{item.Path, status, attempts},
 		})
 	}
 
@@ -138,7 +190,7 @@ func initialModel(files []*FileProcess) model {
 	}
 
 	return model{
-		files: files,
+		items: items,
 		table: tableModel{
 			columns:   columns,
 			rows:      rows,
@@ -178,7 +230,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.table.cursor++
 			}
 		case "enter":
-			m.logView = strings.Join(m.files[m.table.cursor].Logs, "\n")
+			m.logView = strings.Join(m.items[m.table.cursor].File.Logs, "\n")
 		}
 	case FileUpdate:
 		m.updateFileStatus(msg)
@@ -189,28 +241,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) updateFileStatus(update FileUpdate) {
-	for i, f := range m.files {
-		if f.Path == update.Path {
-			f.mu.Lock()
+
+	for i, item := range m.items {
+		if item.Type == "file" && item.File.Path == update.Path {
+			item.File.mu.Lock()
 			if update.Status != "" {
-				f.Status = update.Status
+				item.File.Status = update.Status
 			}
 			if update.Log != "" {
-				f.Logs = append(f.Logs, update.Log)
+				item.File.Logs = append(item.File.Logs, update.Log)
 			}
 			if strings.Contains(update.Status, "Attempt") {
-				f.Retries++
+				item.File.Retries++
 			}
-			f.mu.Unlock()
-
+			item.File.mu.Unlock()
 			m.table.rows[i].Data = []string{
-				shortPath(f.Path),
-				f.Status,
-				fmt.Sprintf("%d/%d", f.Retries, 5),
+				strings.Repeat(" ", item.Indent) + filepath.Base(item.File.Path),
+				item.File.Status,
+				fmt.Sprintf("%d/%d", item.File.Retries, 5),
 			}
 			break
 		}
-	}
+	}	
 }
 
 func (m model) View() string {
@@ -295,10 +347,13 @@ func (m tableModel) renderRows() []string {
 	return rows
 }
 
-func (cli *CLI) processFiles(updates chan<- FileUpdate, files []*FileProcess) {
+func (cli *CLI) processFiles(updates chan<- FileUpdate, items []TableItem) {
 	var wg sync.WaitGroup
 
-	for _, file := range files {
+	for _, item := range items {
+		if item.Type != "file" {
+			continue
+		}
 		wg.Add(1)
 		go func(file *FileProcess) {
 			defer wg.Done()
@@ -324,7 +379,7 @@ func (cli *CLI) processFiles(updates chan<- FileUpdate, files []*FileProcess) {
 				}
 			}
 			updates <- FileUpdate{Path: file.Path, Status: "Failed"}
-		}(file)
+		}(item.File)
 	}
 
 	wg.Wait()
