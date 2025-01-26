@@ -1,5 +1,3 @@
-Here's an updated README that better reflects your current implementation:
-
 # DeepRefactor
 
 DeepRefactor is an AI-powered CLI tool that automatically fixes Go linting errors through iterative refactoring. It combines a terminal UI with local Ollama integration to provide an interactive code quality improvement experience.
