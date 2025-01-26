@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func main() {
+func mistakes3() {
 	logFile, _ := os.Create("log.txt") // Error not handled here
 	defer logFile.Close()              // Deferring close without ensuring logFile was created successfully
 

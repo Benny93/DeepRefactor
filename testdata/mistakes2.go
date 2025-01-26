@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func main() {
+func mistakes2() {
 	var x int = 42 // Redundant variable initialization
 	y := "Hello, World!"
 	fmt.Println(y)

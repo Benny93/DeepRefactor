@@ -4,7 +4,7 @@ import (
 	"fmt"
 )
 
-func main() {
+func mistakes() {
 	// Error: unused variable 'x'
 	var x int
 	fmt.Println(x)
