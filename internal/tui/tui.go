@@ -12,6 +12,24 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+var (
+	logHeaderStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#5A5A5A")).
+			Padding(0, 1)
+
+	logFooterStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#A0A0A0")).
+			Background(lipgloss.Color("#2B2B2B")).
+			Padding(0, 1)
+
+	logBorderStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#4A4A4A")).
+			Padding(0, 0)
+)
+
 type model struct {
 	items      []types.TableItem
 	table      tableModel
@@ -107,10 +125,8 @@ func InitialModel(files []*types.FileProcess) model {
 	}
 
 	vp := viewport.New(0, 0)
-	vp.Style = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		Padding(0, 1)
 	vp.MouseWheelEnabled = true
+	vp.Style = logBorderStyle
 
 	return model{
 		items: items,
@@ -141,14 +157,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+
+		headerHeight := lipgloss.Height(m.logHeaderView())
+		footerHeight := lipgloss.Height(m.logFooterView())
+		verticalMargin := headerHeight + footerHeight
+
 		tableWidth := m.width/2 - 4
-		logWidth := m.width/2 - 6
-		logHeight := m.height - 6
+		logWidth := m.width/2 - 4
+		logHeight := m.height - verticalMargin - 4
 
 		m.table.maxWidth = tableWidth
-		m.table.maxHeight = logHeight
+		m.table.maxHeight = logHeight + verticalMargin
 		m.logView.Width = logWidth
 		m.logView.Height = logHeight
+		m.logView.YPosition = headerHeight + 1
 		m.updateLogView()
 
 	case tea.KeyMsg:
@@ -213,13 +235,40 @@ func (m *model) updateLogView() {
 	if m.table.cursor >= 0 && m.table.cursor < len(m.items) {
 		item := m.items[m.table.cursor]
 		if item.Type == "file" {
-			content := strings.Join(item.File.Logs, "\n")
+			var lines []string
+			for i, log := range item.File.Logs {
+				lines = append(lines, fmt.Sprintf("%4d │ %s", i+1, log))
+			}
+			content := strings.Join(lines, "\n")
 			m.logView.SetContent(content)
-			if !m.logFocused {
+
+			if m.logView.AtBottom() {
 				m.logView.GotoBottom()
 			}
 		}
 	}
+}
+
+func (m model) logHeaderView() string {
+	var title string
+	if m.table.cursor >= 0 && m.table.cursor < len(m.items) {
+		item := m.items[m.table.cursor]
+		if item.Type == "file" {
+			title = filepath.Base(item.File.Path)
+		}
+	}
+	if title == "" {
+		title = "No file selected"
+	}
+	return logHeaderStyle.Render("📄 " + title)
+}
+
+func (m model) logFooterView() string {
+	info := fmt.Sprintf(" %3.f%% ", m.logView.ScrollPercent()*100)
+	if m.logFocused {
+		info += " ↑/↓: scroll • ESC: back "
+	}
+	return logFooterStyle.Render(info)
 }
 
 func (m *model) updateFileStatus(update types.FileUpdate) {
@@ -253,16 +302,17 @@ func (m model) View() string {
 	}
 
 	table := m.table.View()
-	logStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		Width(m.logView.Width).
-		Height(m.logView.Height)
 
-	if m.logFocused {
-		logStyle = logStyle.BorderForeground(lipgloss.Color("62"))
-	}
+	logContent := lipgloss.JoinVertical(lipgloss.Left,
+		m.logHeaderView(),
+		m.logView.View(),
+		m.logFooterView(),
+	)
 
-	logView := logStyle.Render(m.logView.View())
+	logView := logBorderStyle.
+		Width(m.logView.Width + 2).
+		Height(m.logView.Height + lipgloss.Height(m.logHeaderView()) + lipgloss.Height(m.logFooterView())).
+		Render(logContent)
 
 	return lipgloss.Place(
 		m.width,
@@ -312,7 +362,6 @@ func (m tableModel) renderRows() []string {
 				BorderLeft(true).
 				BorderStyle(lipgloss.ThickBorder()).
 				BorderLeftForeground(lipgloss.Color("#FFFFFF"))
-
 		}
 
 		for _, d := range row.Data {
@@ -321,4 +370,11 @@ func (m tableModel) renderRows() []string {
 		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Left, cells...))
 	}
 	return rows
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
