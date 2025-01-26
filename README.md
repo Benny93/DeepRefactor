@@ -1,204 +1,164 @@
+Here's an updated README that better reflects your current implementation:
+
 # DeepRefactor
 
-DeepRefactor is a CLI tool designed to automatically fix Go linting errors using the power of AI. It integrates with a local Ollama server and the `deepseek-coder-v2` model to analyze and refactor your Go code, ensuring it adheres to best practices and resolves linting issues.
-
-> This is a prototype as of now...
+DeepRefactor is an AI-powered CLI tool that automatically fixes Go linting errors through iterative refactoring. It combines a terminal UI with local Ollama integration to provide an interactive code quality improvement experience.
 
 ![demo](./imgs/demo.gif)
 
----
-
 ## Features
 
-- **Automated Linting Fixes**: Automatically fixes Go linting errors by leveraging AI.
-- **Integration with Ollama**: Connects to a local Ollama server for AI-powered code refactoring.
-- **Customizable Prompts**: Provides detailed prompts to the AI model to ensure high-quality fixes.
-- **Loop Until Clean**: Repeats the linting and fixing process until no more errors are found.
-- **Comment Annotations**: Adds `[DeepRefactor]` comments to the code to highlight fixes and summarize issues.
-
----
+- **AI-Powered Fixes**: Uses local Ollama models (default: deepseek-coder-v2) to resolve lint issues
+- **Interactive TUI**: Real-time progress tracking with keyboard controls
+- **Smart Retries**: Configurable attempt system per file (default: 5 retries)
+- **Custom Linting**: Supports any lint command via template injection
+- **Contextual Processing**: Maintains directory structure while processing files
+- **Parallel Processing**: Concurrent file handling with wait groups
 
 ## Prerequisites
 
-Before using DeepRefactor, ensure you have the following installed:
-
-1. **Go**: Install Go from [https://golang.org/dl/](https://golang.org/dl/).
-2. **Ollama**: Install Ollama from [https://ollama.ai/](https://ollama.ai/).
-3. **DeepSeek Coder v2 Model**: Pull the `deepseek-coder-v2` model using Ollama.
-
----
+- **Go 1.20+**
+- **Ollama Server** (running locally)
+- **DeepSeek Coder v2 Model** (or other code-aware LLM):
+  ```bash
+  ollama pull deepseek-coder-v2
+  ```
 
 ## Installation
 
-1. Clone the DeepRefactor repository:
-   ```bash
-   git clone https://github.com/your-username/DeepRefactor.git
-   cd DeepRefactor
-   ```
+```bash
+# Clone repository
+git clone https://github.com/your-username/DeepRefactor.git
+cd DeepRefactor
 
-2. Build the CLI tool:
-   ```bash
-   go build -o deeprefactor
-   ```
+# Build binary
+go build -o deeprefactor
 
-3. Move the binary to a directory in your `PATH` (optional):
-   ```bash
-   sudo mv deeprefactor /usr/local/bin/
-   ```
-
----
-
-## Setting Up Ollama with DeepSeek Coder v2
-
-1. **Install Ollama**:
-   - Follow the installation instructions for your operating system from the [Ollama website](https://ollama.ai/).
-
-2. **Pull the DeepSeek Coder v2 Model**:
-   - Run the following command to download the `deepseek-coder-v2` model:
-     ```bash
-     ollama pull deepseek-coder-v2
-     ```
-
-3. **Start the Ollama Server**:
-   - Ensure the Ollama server is running locally:
-     ```bash
-     ollama serve
-     ```
-
----
+# Install system-wide (optional)
+sudo mv deeprefactor /usr/local/bin/
+```
 
 ## Usage
 
 ### Basic Command
-
-Run DeepRefactor with your preferred Go linting tool (e.g., `golangci-lint`):
-
 ```bash
-deeprefactor golangci-lint run <filename>.go
+deeprefactor --dir ./src --max-retries 3
 ```
 
-Try it out with the provided example
-
+### Full Options
 ```bash
-go run main.go golangci-lint run testdata/mistakes.go
-
-go run main.go golangci-lint run testdata/mistakes.go --max-retries 3
+deeprefactor \
+  --dir ./your-project \          # Target directory (default: .)
+  --max-retries 5 \               # Fix attempts per file (default: 5)
+  --ollama-url http://localhost:11434 \  # Ollama endpoint
+  --model codellama \             # Alternative model
+  --lint-cmd "golangci-lint run {{filepath}}"  # Custom lint command
 ```
 
-### Example
-
-1. Navigate to your Go project directory:
+### Example Workflow
+1. Start Ollama service:
    ```bash
-   cd /path/to/your/project
+   ollama serve
    ```
 
-2. Run DeepRefactor:
+2. Run refactoring:
    ```bash
-   deeprefactor golangci-lint run
+   deeprefactor --dir ./testdata --max-retries 3
    ```
 
-3. DeepRefactor will:
-   - Run the linting tool.
-   - Detect linting errors.
-   - Fix the errors using the Ollama server.
-   - Repeat the process until no more errors are found.
+3. Monitor progress in TUI:
+   ```
+   [Processing] testdata/mistakes.go
+   Attempt 2/3 | Last error: undeclared name
+   ```
 
-### Output Example
+## Architecture
 
-```
-Linting errors:
-testdata\mistakes.go:9:2: S1021: should merge variable declaration with assignment on next line (gosimple)
-        var x int
-        ^
-Filepath found at testdata\mistakes.go
-Fixed version of the file:
-package main
-
-import (
-    "fmt"
-)
-
-func main() {
-    var x int = 0 // [DeepRefactor] Merged declaration and assignment
-    fmt.Println(x)
-}
-File testdata\mistakes.go has been updated with the fixed version.
-
-No linting errors found.
+```mermaid
+graph TD
+    A[CLI Start] --> B[Find Go Files]
+    B --> C[Initialize TUI]
+    C --> D{Process Files}
+    D --> E[Run Lint Command]
+    E --> F{Lint Passed?}
+    F -->|Yes| G[Mark Fixed]
+    F -->|No| H[AI Fix Attempt]
+    H --> I{Success?}
+    I -->|Yes| G
+    I -->|No| J[Retry/Abort]
 ```
 
----
+## Configuration Flags
 
-## Configuration
+| Flag         | Description                          | Default                       |
+|--------------|--------------------------------------|-------------------------------|
+| `--dir`      | Target directory                     | . (current)                   |
+| `--max-retries` | Maximum fix attempts per file     | 5                             |
+| `--ollama-url` | Ollama server URL                 | http://localhost:11434        |
+| `--model`    | AI model for refactoring            | deepseek-coder-v2             |
+| `--lint-cmd` | Lint command template                | `golangci-lint run {{filepath}}` |
 
-### CLI Arguments
+## Implementation Details
 
-- **LintCommand**: The Go linting command to run (e.g., `golangci-lint`).
-- **Args**: Additional arguments to pass to the linting command (optional).
+### AI Integration
+The tool uses a structured prompt template:
+```go
+prompt := fmt.Sprintf(`Fix Go lint errors in %s:
+%s
 
-Example:
-```bash
-deeprefactor golangci-lint run --enable-all
+File content:
+%s
+
+Return only fixed code with [DeepRefactor] comments. No explanations.`, ...)
 ```
 
----
+### Error Handling
+- Exponential backoff between retries
+- Context timeouts (5 minutes/file)
+- Concurrent safety with mutex locks
+- Error streaming to TUI
 
-## How It Works
+### TUI Features
+- Real-time file status updates
+- Scrollable log view
+- Progress percentage
+- Keyboard shortcuts:
+  - ↑/↓: Navigate files
+  - Enter: Focus logs
+  - q: Quit
 
-1. **Run Linting Tool**: DeepRefactor executes the specified linting tool and captures its output.
-2. **Extract File Path**: It extracts the file path from the linting errors.
-3. **Call Ollama Server**: The tool sends the file content and linting errors to the Ollama server for fixing.
-4. **Apply Fixes**: The fixed code is written back to the file.
-5. **Repeat**: The process repeats until no more linting errors are found.
+## Roadmap
 
----
-## Lama info
-Lama api can be called like this
-```bash
-curl http://localhost:11434/api/generate -d '{ "model": "deepseek-coder-v2", "prompt": "How are you today?", "stream": "false"}'
-```
+- [ ] Multi-file context awareness
+- [ ] Interactive conflict resolution
+- [ ] Batch processing mode
+- [ ] Model response caching
+- [ ] Custom prompt templates
+- [ ] CI/CD integration
 
----
+## Troubleshooting
+
+Common Issues:
+1. **Model Not Responding**:
+   - Verify Ollama service is running
+   - Check model download completion
+   ```bash
+   ollama list
+   ```
+
+2. **Lint Command Failures**:
+   - Test your lint command directly
+   - Ensure template contains `{{filepath}}`
+
+3. **Partial Fixes**:
+   - Increase max retries
+   - Try different models
+   ```bash
+   deeprefactor --model starcoder --max-retries 7
+   ```
 
 ## Acknowledgments
 
-- **Ollama**: For providing the infrastructure to run AI models locally.
-- **DeepSeek**: For the powerful code refactoring capabilities.
-
-
-## Prompts used
-First version
-```go
-	prompt := fmt.Sprintf(`I have the following Go linting errors in the file %s:
-%s
-
-Here is the content of the file:
-%s
-
-Please provide a complete fixed version of the file. Do not include any explanations or additional text. Only return the complete code. Add comments to the code where you applied a fix per line. Also add a comment that summarized all the linter issues. All your comments should have the prefix [DeepRefactor]`, fileName, errorOutput, fileContent)
-```
-
-Improvements found with 
-
-```go
-prompt := fmt.Sprintf(`I have the following Go linting error in the file %s:
-%s
-
-Here is the relevant portion of the file:
-%s
-
-Please fix the issue by either removing the unused variable or adding code that uses it. Do not include any explanations or additional text. Only return the fixed code. Add a comment with the prefix [DeepRefactor] to indicate the fix.`, fileName, errorOutput, fileContent)
-
-```
-
-## TODO
-
-- Sometimes the model gets stuck and cannot fix the linter error
-- If it gets stuck it should have the option to start all over again 
-- User interaction
-- Support for Multiple Files
-- Fallback to Manual Fixes
-- Verbose and Quiet Modes
-- Configuration File
-- Performance Optimizations
-- Caching Model Responses
+- [Ollama](https://ollama.ai) - Local LLM infrastructure
+- [Bubble Tea](https://github.com/charmbracelet/bubbletea) - TUI framework
+- [DeepSeek](https://deepseek.com) - Code-optimized AI models
