@@ -81,6 +81,8 @@ Try it out with the provided example
 
 ```bash
 go run main.go golangci-lint run testdata/mistakes.go
+
+go run main.go golangci-lint run testdata/mistakes.go --max-retries 3
 ```
 
 ### Example

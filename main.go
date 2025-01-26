@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,185 +16,216 @@ import (
 	"github.com/alecthomas/kong"
 )
 
-// Define the CLI command structure
+// CLI command structure
 type CLI struct {
-	LintCommand string   `arg:"" help:"The Go lint command to run."`
+	LintCommand string   `arg:"" help:"Go lint command to run"`
 	Args        []string `arg:"" optional:""`
+	MaxRetries  int      `flag:"" default:"5" help:"Maximum fix attempts"`
+	OllamaURL   string   `flag:"" default:"http://localhost:11434" help:"Ollama server URL"`
+	Model       string   `flag:"" default:"deepseek-coder-v2" help:"Ollama model to use"`
 }
 
-// Define the request body for the Ollama API
+// Ollama API request/response structures
 type OllamaRequest struct {
 	Model  string `json:"model"`
 	Prompt string `json:"prompt"`
 	Stream bool   `json:"stream"`
 }
 
-// Define the response structure for the Ollama API
 type OllamaResponse struct {
 	Response string `json:"response"`
+	Done     bool   `json:"done"`
+	Error    string `json:"error"`
 }
 
-// ExtractFilePath extracts a file path from a given string.
-// It supports both Windows-style paths (e.g., `C:\path\to\file.go`) and
-// Unix-style paths (e.g., `/home/user/project/file.go`).
-func ExtractFilePath(input string) string {
-	// Regular expression to match file paths (both absolute and relative)
-	re := regexp.MustCompile(`([A-Za-z]:)?([\\/]?[^:\s\\/]+[\\/]?)+\.go`)
-	return re.FindString(input)
+var (
+	filePathRegex = regexp.MustCompile(`([A-Za-z]:)?([\\/]?[^:\s\\/]+[\\/]?)+\.go`)
+	codeBlockRe   = regexp.MustCompile(`(?s)\x60\x60\x60go(.*?)\x60\x60\x60`)
+)
+
+func main() {
+	var cli CLI
+	kong.Parse(&cli,
+		kong.Name("golint-fixer"),
+		kong.Description("AI-powered Go lint fixer"),
+		kong.UsageOnError(),
+	)
+
+	if err := cli.Run(); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func (cli *CLI) Run() error {
-	iteration := 1
-	for {
-		startTime := time.Now()
-		fmt.Printf("Starting iteration %d...\n", iteration)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
 
-		// Run the linting command
-		lintOutput, err := cli.runLintCommand()
-		if err != nil {
-			// Handle linting errors
-			if err := cli.handleLintingErrors(lintOutput); err != nil {
-				return err
-			}
-		} else {
-			// No linting errors found
-			fmt.Println("No linting errors found.")
-			break
+	for iteration := 1; iteration <= cli.MaxRetries; iteration++ {
+		start := time.Now()
+		fmt.Printf("Iteration %d/%d starting...\n", iteration, cli.MaxRetries)
+
+		output, err := cli.runLintCommand(ctx)
+		if err == nil {
+			fmt.Println("Lint checks passed!")
+			return nil
 		}
 
-		// Log the time taken for the iteration
-		duration := time.Since(startTime)
-		fmt.Printf("Iteration %d completed in %v.\n", iteration, duration)
-		iteration++
+		fmt.Printf("Lint errors:\n%s\n", output)
+		if handleErr := cli.handleLintingErrors(ctx, output); handleErr != nil {
+			return fmt.Errorf("error handling lint issues: %w", handleErr)
+		}
+
+		fmt.Printf("Iteration %d completed in %v\n", iteration, time.Since(start))
 	}
 
-	return nil
+	return fmt.Errorf("failed to resolve issues after %d attempts", cli.MaxRetries)
 }
 
-// runLintCommand runs the linting command and returns its output.
-func (cli *CLI) runLintCommand() (string, error) {
-	cmd := exec.Command(cli.LintCommand, cli.Args...)
-
-	// Capture standard output and standard error
+func (cli *CLI) runLintCommand(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, cli.LintCommand, cli.Args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	// Execute the command
-	if err := cmd.Run(); err != nil {
-		// Combine stdout and stderr for error handling
-		return fmt.Sprintf("%s\n%s", stderr.String(), stdout.String()), err
-	}
+	err := cmd.Run()
+	output := strings.TrimSpace(stderr.String() + stdout.String())
 
-	// Return the combined output if no errors
-	return stdout.String(), nil
+	if err != nil {
+		return output, fmt.Errorf("lint command failed: %w", err)
+	}
+	return output, nil
 }
 
-// handleLintingErrors processes linting errors and fixes the affected file.
-func (cli *CLI) handleLintingErrors(lintOutput string) error {
-	fmt.Printf("Linting errors:\n%s", lintOutput)
-
-	// Extract file path from error message
-	filePath := ExtractFilePath(lintOutput)
-	if filePath == "" {
-		fmt.Println("No file path found.")
-		return fmt.Errorf("no file path found in linting output")
-	}
-	fmt.Println("Filepath found at " + filePath)
-
-	// Read the content of the affected file
-	fileContent, err := os.ReadFile(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to read file %s: %v", filePath, err)
+func (cli *CLI) handleLintingErrors(ctx context.Context, lintOutput string) error {
+	filePaths := ExtractFilePaths(lintOutput)
+	if len(filePaths) == 0 {
+		return fmt.Errorf("no Go files found in lint output")
 	}
 
-	// Call Ollama server to fix the errors
-	if err := callOllamaServer(filePath, string(fileContent), lintOutput); err != nil {
-		return fmt.Errorf("failed to call Ollama server: %v", err)
+	for _, filePath := range filePaths {
+		if err := cli.processFile(ctx, filePath, lintOutput); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func callOllamaServer(fileName, fileContent, errorOutput string) error {
-	// Prepare the prompt for Ollama
-	prompt := fmt.Sprintf(`I have the following Go linting error in the file %s:
+func (cli *CLI) processFile(ctx context.Context, path, lintOutput string) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to read %s: %w", path, err)
+	}
+
+	fixed, err := cli.getFixedCode(ctx, path, string(content), lintOutput)
+	if err != nil {
+		return fmt.Errorf("failed to get fix for %s: %w", path, err)
+	}
+
+	if err := safeWriteFile(path, fixed); err != nil {
+		return fmt.Errorf("failed to write %s: %w", path, err)
+	}
+
+	fmt.Printf("Updated %s with AI-generated fix\n", path)
+	return nil
+}
+
+func (cli *CLI) getFixedCode(ctx context.Context, path, content, errors string) (string, error) {
+	prompt := fmt.Sprintf(`Fix these Go lint errors in %s:
 %s
 
-Here is the relevant portion of the file:
+File content:
 %s
 
-Please fix the issue by either removing the unused variable or adding code that uses it. Do not include any explanations or additional text. Only return the fixed code. Add a comment with the prefix [DeepRefactor] to indicate the fix.`, fileName, errorOutput, fileContent)
-	// Create the request body
-	requestBody := OllamaRequest{
-		Model:  "deepseek-coder-v2", // Replace with your desired model
+Return only the corrected Go code with [DeepRefactor] comments. Use code blocks.`, path, errors, content)
+
+	reqBody := OllamaRequest{
+		Model:  cli.Model,
 		Prompt: prompt,
-		Stream: true, // Enable streaming
+		Stream: true,
 	}
 
-	// Marshal the request body to JSON
-	requestBodyJSON, err := json.Marshal(requestBody)
+	resp, err := cli.sendOllamaRequest(ctx, reqBody)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request body: %v", err)
+		return "", err
 	}
 
-	// Send the request to the local Ollama server
-	resp, err := http.Post("http://localhost:11434/api/generate", "application/json", bytes.NewBuffer(requestBodyJSON))
+	return extractCodeBlock(resp), nil
+}
+
+func (cli *CLI) sendOllamaRequest(ctx context.Context, req OllamaRequest) (string, error) {
+	body, err := json.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("failed to send request to Ollama server: %v", err)
+		return "", fmt.Errorf("marshal request failed: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", cli.OllamaURL+"/api/generate", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create request failed: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Open the file for writing (truncate it to start fresh)
-	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open file %s: %v", fileName, err)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
-	defer file.Close()
 
-	// Create a decoder to read the streaming response
-	decoder := json.NewDecoder(resp.Body)
+	var result strings.Builder
+	dec := json.NewDecoder(resp.Body)
 
-	// Process the streaming response
 	for {
-		var ollamaResponse OllamaResponse
-		if err := decoder.Decode(&ollamaResponse); err != nil {
-			if err.Error() == "EOF" {
-				break // End of stream
+		var chunk OllamaResponse
+		if err := dec.Decode(&chunk); err != nil {
+			if err == io.EOF {
+				break
 			}
-			return fmt.Errorf("failed to decode streaming response: %v", err)
+			return "", fmt.Errorf("decode error: %w", err)
 		}
 
-		// Remove escaping backticks (```) from the response
-		fixedContent := removeEscapingBackticks(ollamaResponse.Response)
-
-		// Write the fixed content to the file
-		if _, err := file.WriteString(fixedContent); err != nil {
-			return fmt.Errorf("failed to write to file %s: %v", fileName, err)
+		if chunk.Error != "" {
+			return "", fmt.Errorf("API error: %s", chunk.Error)
 		}
-
-		// Print the fixed content to the console (optional)
-		fmt.Print(fixedContent)
+		result.WriteString(chunk.Response)
 	}
 
-	fmt.Printf("\nFile %s has been updated with the fixed version.\n", fileName)
-	return nil
+	return result.String(), nil
 }
 
-// removeEscapingBackticks removes the escaping backticks (```) from the response
-func removeEscapingBackticks(response string) string {
+func safeWriteFile(path, content string) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
 
-	// Remove leading and trailing backticks (```)
-	response = strings.TrimPrefix(response, "```go")
-	response = strings.TrimPrefix(response, "go")
-	response = strings.TrimSuffix(response, "```")
+func ExtractFilePaths(input string) []string {
+	return filePathRegex.FindAllString(input, -1)
+}
+
+func extractCodeBlock(response string) string {
+	matches := codeBlockRe.FindStringSubmatch(response)
+	if len(matches) > 1 {
+		return strings.TrimSpace(matches[1])
+	}
 	return response
 }
 
-func main() {
-	var cli CLI
-	kongContext := kong.Parse(&cli)
-	if err := kongContext.Run(&cli); err != nil {
-		kongContext.Fatalf(err.Error())
+func (cli *CLI) verifyFix(ctx context.Context) error {
+	const maxRetries = 3
+	for i := 0; i < maxRetries; i++ {
+		if output, err := cli.runLintCommand(ctx); err == nil {
+			return nil
+		} else {
+			fmt.Printf("Verification failed (attempt %d):\n%s\n", i+1, output)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
+	return fmt.Errorf("fix verification failed after %d attempts", maxRetries)
 }
