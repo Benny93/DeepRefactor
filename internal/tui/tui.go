@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,6 +14,33 @@ import (
 )
 
 var (
+	// Table styling
+	tableHeaderStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Background(lipgloss.Color("#5A5A5A")).
+				Padding(0, 1)
+
+	tableDirectoryStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#7D56F4")).
+				Padding(0, 1)
+
+	tableFileStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#D0D0D0")).
+			Padding(0, 1)
+
+	tableSelectedStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#3C3C3C")).
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Padding(0, 1)
+
+	tableBorderStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#4A4A4A")).
+				Padding(0, 0)
+
+	// Log view styling
 	logHeaderStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#FFFFFF")).
@@ -24,38 +52,32 @@ var (
 			Background(lipgloss.Color("#2B2B2B")).
 			Padding(0, 1)
 
-	logBorderStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#4A4A4A")).
-			Padding(0, 0)
+	statusBarStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#A0A0A0")).
+			Background(lipgloss.Color("#2B2B2B")).
+			Padding(0, 1)
 )
 
 type model struct {
-	items      []types.TableItem
-	table      tableModel
-	logView    viewport.Model
-	quitting   bool
-	updateChan chan types.FileUpdate
-	width      int
-	height     int
-	logFocused bool
+	items         []types.TableItem
+	table         tableModel
+	logView       viewport.Model
+	quitting      bool
+	updateChan    chan types.FileUpdate
+	width         int
+	height        int
+	logFocused    bool
+	lastUpdate    sync.Mutex
+	statusMessage string
 }
 
 type tableModel struct {
-	columns   []string
-	rows      []types.Row
-	cursor    int
-	styles    tableStyles
-	maxWidth  int
-	maxHeight int
-}
-
-type tableStyles struct {
-	Header       lipgloss.Style
-	Cell         lipgloss.Style
-	Selected     lipgloss.Style
-	Border       lipgloss.Style
-	HeaderBorder lipgloss.Style
+	columns    []string
+	rows       []types.Row
+	cursor     int
+	maxWidth   int
+	maxHeight  int
+	totalItems int
 }
 
 func Create(files []*types.FileProcess, processFunc func(updates chan<- types.FileUpdate, items []types.TableItem)) error {
@@ -116,26 +138,18 @@ func InitialModel(files []*types.FileProcess) model {
 		})
 	}
 
-	styles := tableStyles{
-		Header:       lipgloss.NewStyle().Bold(true).Padding(0, 1),
-		Cell:         lipgloss.NewStyle().Padding(0, 1),
-		Selected:     lipgloss.NewStyle().Background(lipgloss.Color("#3C3C3C")).Padding(0, 1),
-		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 0),
-		HeaderBorder: lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, true, false),
-	}
-
 	vp := viewport.New(0, 0)
 	vp.MouseWheelEnabled = true
-	vp.Style = logBorderStyle
+	vp.Style = tableBorderStyle
 
 	return model{
 		items: items,
 		table: tableModel{
-			columns:   columns,
-			rows:      rows,
-			styles:    styles,
-			maxWidth:  60,
-			maxHeight: 20,
+			columns:    columns,
+			rows:       rows,
+			maxWidth:   60,
+			maxHeight:  20,
+			totalItems: len(items),
 		},
 		logView:    vp,
 		updateChan: make(chan types.FileUpdate, 100),
@@ -155,71 +169,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-
-		headerHeight := lipgloss.Height(m.logHeaderView())
-		footerHeight := lipgloss.Height(m.logFooterView())
-		verticalMargin := headerHeight + footerHeight
-
-		tableWidth := m.width/2 - 4
-		logWidth := m.width/2 - 4
-		logHeight := m.height - verticalMargin - 4
-
-		m.table.maxWidth = tableWidth
-		m.table.maxHeight = logHeight + verticalMargin
-		m.logView.Width = logWidth
-		m.logView.Height = logHeight
-		m.logView.YPosition = headerHeight + 1
-		m.updateLogView()
+		m.handleResize(msg)
 
 	case tea.KeyMsg:
-		if m.logFocused {
-			switch msg.String() {
-			case "q", "esc":
-				m.logFocused = false
-			case "up", "k":
-				m.logView.LineUp(1)
-			case "down", "j":
-				m.logView.LineDown(1)
-			case "pgup":
-				m.logView.HalfViewUp()
-			case "pgdown":
-				m.logView.HalfViewDown()
-			case "g":
-				m.logView.GotoTop()
-			case "G":
-				m.logView.GotoBottom()
-			}
-		} else {
-			switch msg.String() {
-			case "q", "ctrl+c":
-				m.quitting = true
-				return m, tea.Quit
-			case "up", "k":
-				if m.table.cursor > 0 {
-					m.table.cursor--
-				}
-				m.updateLogView()
-			case "down", "j":
-				if m.table.cursor < len(m.table.rows)-1 {
-					m.table.cursor++
-				}
-				m.updateLogView()
-			case "enter":
-				m.logFocused = true
-			}
-		}
+		cmds = append(cmds, m.handleKeys(msg))
 
 	case tea.MouseMsg:
-		if m.logFocused {
-			m.logView, cmd = m.logView.Update(msg)
-			cmds = append(cmds, cmd)
-		}
+		cmds = append(cmds, m.handleMouse(msg))
 
 	case types.FileUpdate:
-		m.updateFileStatus(msg)
-		m.updateLogView()
+		m.handleFileUpdate(msg)
 		return m, func() tea.Msg { return <-m.updateChan }
 	}
 
@@ -229,6 +188,103 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func (m *model) handleResize(msg tea.WindowSizeMsg) {
+	m.width = msg.Width
+	m.height = msg.Height
+
+	headerHeight := lipgloss.Height(m.logHeaderView())
+	footerHeight := lipgloss.Height(m.logFooterView())
+	verticalMargin := headerHeight + footerHeight
+
+	tableWidth := m.width/2 - 4
+	logWidth := m.width/2 - 4
+	logHeight := m.height - verticalMargin - 4
+
+	m.table.maxWidth = tableWidth
+	m.table.maxHeight = logHeight + verticalMargin
+	m.logView.Width = logWidth
+	m.logView.Height = logHeight
+	m.logView.YPosition = headerHeight + 1
+	m.updateLogView()
+}
+
+func (m *model) handleKeys(msg tea.KeyMsg) tea.Cmd {
+	if m.logFocused {
+		switch msg.String() {
+		case "q", "esc":
+			m.logFocused = false
+		case "up", "k":
+			m.logView.LineUp(1)
+		case "down", "j":
+			m.logView.LineDown(1)
+		case "pgup":
+			m.logView.HalfViewUp()
+		case "pgdown":
+			m.logView.HalfViewDown()
+		case "g":
+			m.logView.GotoTop()
+		case "G":
+			m.logView.GotoBottom()
+		}
+	} else {
+		switch msg.String() {
+		case "q", "ctrl+c":
+			m.quitting = true
+			return tea.Quit
+		case "up", "k":
+			if m.table.cursor > 0 {
+				m.table.cursor--
+			}
+			m.updateLogView()
+		case "down", "j":
+			if m.table.cursor < len(m.table.rows)-1 {
+				m.table.cursor++
+			}
+			m.updateLogView()
+		case "enter":
+			m.logFocused = true
+		}
+	}
+	return nil
+}
+
+func (m *model) handleMouse(msg tea.MouseMsg) tea.Cmd {
+	var cmd tea.Cmd
+	if m.logFocused {
+		m.logView, cmd = m.logView.Update(msg)
+	}
+	return cmd
+}
+
+func (m *model) handleFileUpdate(update types.FileUpdate) {
+	m.lastUpdate.Lock()
+	defer m.lastUpdate.Unlock()
+
+	for i, item := range m.items {
+		if item.Type == "file" && item.File.Path == update.Path {
+			item.File.Mutex.Lock()
+			if update.Status != "" {
+				item.File.Status = update.Status
+			}
+			if update.Log != "" {
+				item.File.Logs = append(item.File.Logs, update.Log)
+			}
+			if strings.Contains(update.Status, "Attempt") {
+				item.File.Retries++
+			}
+			item.File.Mutex.Unlock()
+
+			m.table.rows[i].Data = []string{
+				strings.Repeat(" ", item.Indent) + filepath.Base(item.File.Path),
+				item.File.Status,
+				fmt.Sprintf("%d/%d", item.File.Retries, 5),
+			}
+			break
+		}
+	}
+	m.updateLogView()
 }
 
 func (m *model) updateLogView() {
@@ -247,6 +303,107 @@ func (m *model) updateLogView() {
 			}
 		}
 	}
+}
+
+func (m model) View() string {
+	if m.quitting {
+		return ""
+	}
+
+	table := m.renderTable()
+	logView := m.renderLogView()
+
+	mainView := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		table,
+		"  ",
+		logView,
+	)
+
+	statusBar := statusBarStyle.Render(fmt.Sprintf(
+		" %d items | %s | %s ",
+		m.table.totalItems,
+		m.getStatusMessage(),
+		"↑/↓: Navigate • Enter: Logs • Q: Quit",
+	))
+
+	return lipgloss.Place(
+		m.width,
+		m.height,
+		lipgloss.Center,
+		lipgloss.Center,
+		lipgloss.JoinVertical(
+			lipgloss.Left,
+			mainView,
+			statusBar,
+		),
+	)
+}
+
+func (m model) renderTable() string {
+	header := m.renderTableHeader()
+	rows := m.renderTableRows()
+
+	return tableBorderStyle.
+		Width(m.table.maxWidth).
+		Height(m.table.maxHeight).
+		Render(lipgloss.JoinVertical(lipgloss.Left, header, rows))
+}
+
+func (m model) renderTableHeader() string {
+	var headers []string
+	for i, col := range m.table.columns {
+		width := 10
+		if i == 0 {
+			width = m.table.maxWidth - 40
+		}
+		header := tableHeaderStyle.Width(width).Render(col)
+		headers = append(headers, header)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Left, headers...)
+}
+
+func (m model) renderTableRows() string {
+	var renderedRows []string
+	for i, row := range m.table.rows {
+		item := m.items[i]
+		var cells []string
+
+		for j, d := range row.Data {
+			style := tableFileStyle
+			if item.Type == "directory" {
+				style = tableDirectoryStyle
+			}
+			if i == m.table.cursor {
+				style = tableSelectedStyle
+			}
+
+			// Apply different width constraints
+			switch m.table.columns[j] {
+			case "Path":
+				cells = append(cells, style.Width(m.table.maxWidth-40).Render(d))
+			case "Status":
+				cells = append(cells, style.Width(18).Render(d))
+			case "Attempts":
+				cells = append(cells, style.Width(10).Render(d))
+			}
+		}
+		renderedRows = append(renderedRows, lipgloss.JoinHorizontal(lipgloss.Left, cells...))
+	}
+	return strings.Join(renderedRows, "\n")
+}
+
+func (m model) renderLogView() string {
+	logContent := lipgloss.JoinVertical(lipgloss.Left,
+		m.logHeaderView(),
+		m.logView.View(),
+		m.logFooterView(),
+	)
+
+	return tableBorderStyle.
+		Width(m.logView.Width + 2).
+		Height(m.logView.Height + lipgloss.Height(m.logHeaderView()) + lipgloss.Height(m.logFooterView())).
+		Render(logContent)
 }
 
 func (m model) logHeaderView() string {
@@ -271,105 +428,14 @@ func (m model) logFooterView() string {
 	return logFooterStyle.Render(info)
 }
 
-func (m *model) updateFileStatus(update types.FileUpdate) {
-	for i, item := range m.items {
-		if item.Type == "file" && item.File.Path == update.Path {
-			item.File.Mutex.Lock()
-			if update.Status != "" {
-				item.File.Status = update.Status
-			}
-			if update.Log != "" {
-				item.File.Logs = append(item.File.Logs, update.Log)
-			}
-			if strings.Contains(update.Status, "Attempt") {
-				item.File.Retries++
-			}
-			item.File.Mutex.Unlock()
-
-			m.table.rows[i].Data = []string{
-				strings.Repeat(" ", item.Indent) + filepath.Base(item.File.Path),
-				item.File.Status,
-				fmt.Sprintf("%d/%d", item.File.Retries, 5),
-			}
-			break
-		}
+func (m *model) getStatusMessage() string {
+	if m.statusMessage != "" {
+		return m.statusMessage
 	}
-}
-
-func (m model) View() string {
-	if m.quitting {
-		return ""
+	if len(m.items) == 0 {
+		return "No files processed"
 	}
-
-	table := m.table.View()
-
-	logContent := lipgloss.JoinVertical(lipgloss.Left,
-		m.logHeaderView(),
-		m.logView.View(),
-		m.logFooterView(),
-	)
-
-	logView := logBorderStyle.
-		Width(m.logView.Width + 2).
-		Height(m.logView.Height + lipgloss.Height(m.logHeaderView()) + lipgloss.Height(m.logFooterView())).
-		Render(logContent)
-
-	return lipgloss.Place(
-		m.width,
-		m.height,
-		lipgloss.Center,
-		lipgloss.Center,
-		lipgloss.JoinHorizontal(
-			lipgloss.Top,
-			table,
-			"  ",
-			logView,
-		),
-	)
-}
-
-func (m tableModel) View() string {
-	header := m.renderHeader()
-	rows := m.renderRows()
-
-	tableContent := lipgloss.JoinVertical(lipgloss.Left,
-		header,
-		strings.Join(rows, "\n"),
-	)
-
-	return m.styles.Border.
-		Width(m.maxWidth).
-		Height(m.maxHeight).
-		Render(tableContent)
-}
-
-func (m tableModel) renderHeader() string {
-	var cols []string
-	for _, col := range m.columns {
-		cols = append(cols, m.styles.Header.Render(col))
-	}
-	header := lipgloss.JoinHorizontal(lipgloss.Left, cols...)
-	return m.styles.HeaderBorder.Render(header) + "\n"
-}
-
-func (m tableModel) renderRows() []string {
-	var rows []string
-	for i, row := range m.rows {
-		var cells []string
-		style := m.styles.Cell
-		if i == m.cursor {
-			style = m.styles.Selected.
-				BorderLeft(true).
-				BorderStyle(lipgloss.ThickBorder()).
-				BorderLeftForeground(lipgloss.Color("#FFFFFF"))
-		}
-
-		for _, d := range row.Data {
-			cells = append(cells, style.Render(d))
-		}
-		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Left, cells...))
-	}
-	return rows
+	return "OK"
 }
 
 func max(a, b int) int {
