@@ -31,7 +31,7 @@ func (c *AIClient) FixFile(ctx context.Context, path string, lintOutput string, 
 		return fmt.Errorf("read file: %w", err)
 	}
 
-	fixed, err := c.GetFixedCode(ctx, path, string(content), lintOutput)
+	fixed, err := c.GetFixedCode(ctx, path, string(content), lintOutput, updates)
 	if err != nil {
 		return fmt.Errorf("AI fix: %w", err)
 	}
@@ -44,7 +44,7 @@ func (c *AIClient) FixFile(ctx context.Context, path string, lintOutput string, 
 	return nil
 }
 
-func (c *AIClient) GetFixedCode(ctx context.Context, path, content, errors string) (string, error) {
+func (c *AIClient) GetFixedCode(ctx context.Context, path, content, errors string, updates chan<- types.FileUpdate) (string, error) {
 	prompt := fmt.Sprintf(`Fix these Go lint errors in %s:
 %s
 
@@ -63,6 +63,7 @@ Return only the corrected Go code with [DeepRefactor] comments. Use code blocks.
 		Stream: false,
 	}
 
+	updates <- types.FileUpdate{Path: path, Log: "Sending request to ollama!"}
 	resp, err := c.SendOllamaRequest(ctx, reqBody)
 	if err != nil {
 		return "", err

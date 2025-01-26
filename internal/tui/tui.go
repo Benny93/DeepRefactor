@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -14,18 +15,18 @@ import (
 type model struct {
 	items      []types.TableItem
 	table      tableModel
-	logView    string
+	logView    viewport.Model
 	quitting   bool
 	updateChan chan types.FileUpdate
 	width      int
 	height     int
+	logFocused bool
 }
 
 type tableModel struct {
 	columns   []string
 	rows      []types.Row
 	cursor    int
-	selected  int
 	styles    tableStyles
 	maxWidth  int
 	maxHeight int
@@ -40,12 +41,11 @@ type tableStyles struct {
 }
 
 func Create(files []*types.FileProcess, processFunc func(updates chan<- types.FileUpdate, items []types.TableItem)) error {
-
 	m := InitialModel(files)
 	m.updateChan = make(chan types.FileUpdate, 100)
 
 	processFunc(m.updateChan, m.items)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("error running TUI: %w", err)
 	}
@@ -53,31 +53,26 @@ func Create(files []*types.FileProcess, processFunc func(updates chan<- types.Fi
 }
 
 func InitialModel(files []*types.FileProcess) model {
-	// Group files by directory
 	dirMap := make(map[string][]*types.FileProcess)
 	for _, f := range files {
 		dir := filepath.Dir(f.Path)
 		dirMap[dir] = append(dirMap[dir], f)
 	}
 
-	// Create sorted list of directories
 	var dirs []string
 	for dir := range dirMap {
 		dirs = append(dirs, dir)
 	}
 	sort.Strings(dirs)
 
-	// Create table items with directory groups
 	var items []types.TableItem
 	for _, dir := range dirs {
-		// Add directory row
 		items = append(items, types.TableItem{
 			Type:   "directory",
 			Path:   dir + string(filepath.Separator),
 			Indent: 0,
 		})
 
-		// Add file rows
 		for _, f := range dirMap[dir] {
 			items = append(items, types.TableItem{
 				Type:   "file",
@@ -88,10 +83,7 @@ func InitialModel(files []*types.FileProcess) model {
 		}
 	}
 
-	// Create table columns
 	columns := []string{"Path", "Status", "Attempts"}
-
-	// Create initial rows for table
 	var rows []types.Row
 	for _, item := range items {
 		var status, attempts string
@@ -110,9 +102,15 @@ func InitialModel(files []*types.FileProcess) model {
 		Header:       lipgloss.NewStyle().Bold(true).Padding(0, 1),
 		Cell:         lipgloss.NewStyle().Padding(0, 1),
 		Selected:     lipgloss.NewStyle().Background(lipgloss.Color("#3C3C3C")).Padding(0, 1),
-		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder(), true).Padding(0, 0),
+		Border:       lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 0),
 		HeaderBorder: lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, true, false),
 	}
+
+	vp := viewport.New(0, 0)
+	vp.Style = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(0, 1)
+	vp.MouseWheelEnabled = true
 
 	return model{
 		items: items,
@@ -120,9 +118,10 @@ func InitialModel(files []*types.FileProcess) model {
 			columns:   columns,
 			rows:      rows,
 			styles:    styles,
-			maxWidth:  60, // Adjust based on terminal width
+			maxWidth:  60,
 			maxHeight: 20,
 		},
+		logView:    vp,
 		updateChan: make(chan types.FileUpdate, 100),
 	}
 }
@@ -135,38 +134,95 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	var cmds []tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.table.maxWidth = msg.Width - 4
-		m.table.maxHeight = msg.Height - 6
+		tableWidth := m.width/2 - 4
+		logWidth := m.width/2 - 6
+		logHeight := m.height - 6
+
+		m.table.maxWidth = tableWidth
+		m.table.maxHeight = logHeight
+		m.logView.Width = logWidth
+		m.logView.Height = logHeight
+		m.updateLogView()
+
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			m.quitting = true
-			return m, tea.Quit
-		case "up", "k":
-			if m.table.cursor > 0 {
-				m.table.cursor--
+		if m.logFocused {
+			switch msg.String() {
+			case "q", "esc":
+				m.logFocused = false
+			case "up", "k":
+				m.logView.LineUp(1)
+			case "down", "j":
+				m.logView.LineDown(1)
+			case "pgup":
+				m.logView.HalfViewUp()
+			case "pgdown":
+				m.logView.HalfViewDown()
+			case "g":
+				m.logView.GotoTop()
+			case "G":
+				m.logView.GotoBottom()
 			}
-		case "down", "j":
-			if m.table.cursor < len(m.table.rows)-1 {
-				m.table.cursor++
+		} else {
+			switch msg.String() {
+			case "q", "ctrl+c":
+				m.quitting = true
+				return m, tea.Quit
+			case "up", "k":
+				if m.table.cursor > 0 {
+					m.table.cursor--
+				}
+				m.updateLogView()
+			case "down", "j":
+				if m.table.cursor < len(m.table.rows)-1 {
+					m.table.cursor++
+				}
+				m.updateLogView()
+			case "enter":
+				m.logFocused = true
 			}
-		case "enter":
-			m.logView = strings.Join(m.items[m.table.cursor].File.Logs, "\n")
 		}
+
+	case tea.MouseMsg:
+		if m.logFocused {
+			m.logView, cmd = m.logView.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+
 	case types.FileUpdate:
 		m.updateFileStatus(msg)
+		m.updateLogView()
 		return m, func() tea.Msg { return <-m.updateChan }
 	}
 
-	return m, nil
+	if m.logFocused {
+		m.logView, cmd = m.logView.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+
+	return m, tea.Batch(cmds...)
+}
+
+func (m *model) updateLogView() {
+	if m.table.cursor >= 0 && m.table.cursor < len(m.items) {
+		item := m.items[m.table.cursor]
+		if item.Type == "file" {
+			content := strings.Join(item.File.Logs, "\n")
+			m.logView.SetContent(content)
+			if !m.logFocused {
+				m.logView.GotoBottom()
+			}
+		}
+	}
 }
 
 func (m *model) updateFileStatus(update types.FileUpdate) {
-
 	for i, item := range m.items {
 		if item.Type == "file" && item.File.Path == update.Path {
 			item.File.Mutex.Lock()
@@ -180,6 +236,7 @@ func (m *model) updateFileStatus(update types.FileUpdate) {
 				item.File.Retries++
 			}
 			item.File.Mutex.Unlock()
+
 			m.table.rows[i].Data = []string{
 				strings.Repeat(" ", item.Indent) + filepath.Base(item.File.Path),
 				item.File.Status,
@@ -195,23 +252,18 @@ func (m model) View() string {
 		return ""
 	}
 
-	// Calculate layout dimensions
-	tableWidth := m.width/2 - 4
-	logWidth := m.width/2 - 4
-	m.table.maxWidth = tableWidth
-	m.table.maxHeight = m.height - 4
-
-	// Render table and logs
 	table := m.table.View()
 	logStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder(), true).
-		Padding(1, 2).
-		Width(logWidth).
-		Height(m.height - 4)
+		Border(lipgloss.RoundedBorder()).
+		Width(m.logView.Width).
+		Height(m.logView.Height)
 
-	logView := logStyle.Render(m.logView)
+	if m.logFocused {
+		logStyle = logStyle.BorderForeground(lipgloss.Color("62"))
+	}
 
-	// Create master-detail layout
+	logView := logStyle.Render(m.logView.View())
+
 	return lipgloss.Place(
 		m.width,
 		m.height,
@@ -220,7 +272,7 @@ func (m model) View() string {
 		lipgloss.JoinHorizontal(
 			lipgloss.Top,
 			table,
-			"  ", // Spacer between panels
+			"  ",
 			logView,
 		),
 	)
@@ -230,13 +282,11 @@ func (m tableModel) View() string {
 	header := m.renderHeader()
 	rows := m.renderRows()
 
-	// Combine header and rows
 	tableContent := lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		strings.Join(rows, "\n"),
 	)
 
-	// Add border around the entire table
 	return m.styles.Border.
 		Width(m.maxWidth).
 		Height(m.maxHeight).
@@ -262,6 +312,7 @@ func (m tableModel) renderRows() []string {
 				BorderLeft(true).
 				BorderStyle(lipgloss.ThickBorder()).
 				BorderLeftForeground(lipgloss.Color("#FFFFFF"))
+
 		}
 
 		for _, d := range row.Data {
