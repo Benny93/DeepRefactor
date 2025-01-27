@@ -28,7 +28,7 @@ func (cli *CLI) Run() error {
 
 	tui.Create(files, func(updates chan<- types.FileUpdate, items []types.TableItem) {
 		go cli.processFiles(updates, items)
-	})
+	}, cli.LintCmd)
 	return nil
 }
 

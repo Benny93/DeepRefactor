@@ -69,6 +69,7 @@ type model struct {
 	logFocused    bool
 	lastUpdate    sync.Mutex
 	statusMessage string
+	lintCmd       string
 }
 
 type tableModel struct {
@@ -80,10 +81,10 @@ type tableModel struct {
 	totalItems int
 }
 
-func Create(files []*types.FileProcess, processFunc func(updates chan<- types.FileUpdate, items []types.TableItem)) error {
+func Create(files []*types.FileProcess, processFunc func(updates chan<- types.FileUpdate, items []types.TableItem), lintCmd string) error {
 	m := InitialModel(files)
 	m.updateChan = make(chan types.FileUpdate, 100)
-
+	m.lintCmd = lintCmd
 	processFunc(m.updateChan, m.items)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
@@ -210,54 +211,6 @@ func (m *model) handleResize(msg tea.WindowSizeMsg) {
 	m.updateLogView()
 }
 
-func (m *model) handleKeys(msg tea.KeyMsg) tea.Cmd {
-	if m.logFocused {
-		switch msg.String() {
-		case "q", "esc":
-			m.logFocused = false
-		case "up", "k":
-			m.logView.LineUp(1)
-		case "down", "j":
-			m.logView.LineDown(1)
-		case "pgup":
-			m.logView.HalfViewUp()
-		case "pgdown":
-			m.logView.HalfViewDown()
-		case "g":
-			m.logView.GotoTop()
-		case "G":
-			m.logView.GotoBottom()
-		}
-	} else {
-		switch msg.String() {
-		case "q", "ctrl+c":
-			m.quitting = true
-			return tea.Quit
-		case "up", "k":
-			if m.table.cursor > 0 {
-				m.table.cursor--
-			}
-			m.updateLogView()
-		case "down", "j":
-			if m.table.cursor < len(m.table.rows)-1 {
-				m.table.cursor++
-			}
-			m.updateLogView()
-		case "enter":
-			m.logFocused = true
-		}
-	}
-	return nil
-}
-
-func (m *model) handleMouse(msg tea.MouseMsg) tea.Cmd {
-	var cmd tea.Cmd
-	if m.logFocused {
-		m.logView, cmd = m.logView.Update(msg)
-	}
-	return cmd
-}
-
 func (m *model) handleFileUpdate(update types.FileUpdate) {
 	m.lastUpdate.Lock()
 	defer m.lastUpdate.Unlock()
@@ -285,24 +238,6 @@ func (m *model) handleFileUpdate(update types.FileUpdate) {
 		}
 	}
 	m.updateLogView()
-}
-
-func (m *model) updateLogView() {
-	if m.table.cursor >= 0 && m.table.cursor < len(m.items) {
-		item := m.items[m.table.cursor]
-		if item.Type == "file" {
-			var lines []string
-			for i, log := range item.File.Logs {
-				lines = append(lines, fmt.Sprintf("%4d │ %s", i+1, log))
-			}
-			content := strings.Join(lines, "\n")
-			m.logView.SetContent(content)
-
-			if m.logView.AtBottom() {
-				m.logView.GotoBottom()
-			}
-		}
-	}
 }
 
 func (m model) View() string {
@@ -393,41 +328,6 @@ func (m model) renderTableRows() string {
 	return strings.Join(renderedRows, "\n")
 }
 
-func (m model) renderLogView() string {
-	logContent := lipgloss.JoinVertical(lipgloss.Left,
-		m.logHeaderView(),
-		m.logView.View(),
-		m.logFooterView(),
-	)
-
-	return tableBorderStyle.
-		Width(m.logView.Width + 2).
-		Height(m.logView.Height + lipgloss.Height(m.logHeaderView()) + lipgloss.Height(m.logFooterView())).
-		Render(logContent)
-}
-
-func (m model) logHeaderView() string {
-	var title string
-	if m.table.cursor >= 0 && m.table.cursor < len(m.items) {
-		item := m.items[m.table.cursor]
-		if item.Type == "file" {
-			title = filepath.Base(item.File.Path)
-		}
-	}
-	if title == "" {
-		title = "No file selected"
-	}
-	return logHeaderStyle.Render("📄 " + title)
-}
-
-func (m model) logFooterView() string {
-	info := fmt.Sprintf(" %3.f%% ", m.logView.ScrollPercent()*100)
-	if m.logFocused {
-		info += " ↑/↓: scroll • ESC: back "
-	}
-	return logFooterStyle.Render(info)
-}
-
 func (m *model) getStatusMessage() string {
 	if m.statusMessage != "" {
 		return m.statusMessage
@@ -436,11 +336,4 @@ func (m *model) getStatusMessage() string {
 		return "No files processed"
 	}
 	return "OK"
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
